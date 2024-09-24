@@ -1,0 +1,1 @@
+# plugins-doofinder-for-woocommerce
