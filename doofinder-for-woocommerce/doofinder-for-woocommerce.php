@@ -3,7 +3,7 @@
  * Plugin Name: DOOFINDER Search and Discovery for WP & WooCommerce
  * License: GPLv2 or later
  * License URI: http://www.gnu.org/licenses/gpl-2.0.html
- * Version: 2.5.8
+ * Version: 2.5.11
  * Requires at least: 5.6
  * Requires PHP: 7.0
  * Author: Doofinder
@@ -38,7 +38,7 @@ if ( ! class_exists( '\Doofinder\WP\Doofinder_For_WordPress' ) ) :
 		 * @var string
 		 */
 
-		public static $version = '2.5.8';
+		public static $version = '2.5.11';
 
 		/**
 		 * The only instance of Doofinder_For_WordPress
@@ -425,11 +425,11 @@ if ( ! class_exists( '\Doofinder\WP\Doofinder_For_WordPress' ) ) :
 			add_action(
 				'wp_ajax_doofinder_notice_dismiss',
 				function () {
-					if ( ! isset( $_POST['nonce'] ) || ! isset( $_POST['notice_id'] ) || ! wp_verify_nonce( wp_unslash( $_POST['nonce'] ), 'doofinder-ajax-nonce' ) ) {
+					if ( ! isset( $_POST['nonce'] ) || ! isset( $_POST['notice_id'] ) || ! wp_verify_nonce( sanitize_key( $_POST['nonce'] ), 'doofinder-ajax-nonce' ) ) {
 						status_header( WP_Http::UNAUTHORIZED );
 						die( 'Unauthorized request' );
 					}
-					$notice_id = wp_unslash( $_POST['notice_id'] );
+					$notice_id = sanitize_text_field( wp_unslash( $_POST['notice_id'] ) );
 					Admin_Notices::remove_notice( $notice_id );
 					wp_send_json(
 						array(
