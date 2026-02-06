@@ -1,9 +1,9 @@
 <?php
 /**
  * Plugin Name: DOOFINDER Search and Discovery for WP & WooCommerce
- * License: GPLv2 or later
- * License URI: http://www.gnu.org/licenses/gpl-2.0.html
- * Version: 2.10.1
+ * License: MIT
+ * License URI: https://opensource.org/licenses/MIT
+ * Version: 2.10.12
  * Requires at least: 5.6
  * Requires PHP: 7.0
  * Author: Doofinder
@@ -41,7 +41,7 @@ if ( ! class_exists( '\Doofinder\WP\Doofinder_For_WordPress' ) ) :
 		 * @var string
 		 */
 
-		public static $version = '2.10.1';
+		public static $version = '2.10.12';
 
 		/**
 		 * The only instance of Doofinder_For_WordPress
@@ -291,6 +291,7 @@ if ( ! class_exists( '\Doofinder\WP\Doofinder_For_WordPress' ) ) :
 		 * @param array        $options Array of bulk item update data, like the action or the type.
 		 */
 		public static function upgrader_process_complete( $upgrader_object, $options ) {
+			self::autoload( self::plugin_path() . 'includes/' );
 			$log = new Log();
 			$log->log( 'upgrader_process - start' );
 			// The path to our plugin's main file.
@@ -497,6 +498,20 @@ endif;
 
 register_activation_hook( __FILE__, array( '\Doofinder\WP\Doofinder_For_WordPress', 'plugin_enabled' ) );
 register_deactivation_hook( __FILE__, array( '\Doofinder\WP\Doofinder_For_WordPress', 'plugin_disabled' ) );
+
+/*
+ * Ensure Doofinder receives prices in the store's default currency.
+ *
+ * This prevents WooPayments multi-currency from converting prices based on request geolocation.
+ */
+if ( isset( $_SERVER['HTTP_DOOFINDER_ORIGIN'] ) ) {
+	add_filter(
+		'wcpay_multi_currency_override_selected_currency',
+		function () {
+			return get_option( 'woocommerce_currency' );
+		}
+	);
+}
 
 add_action( 'admin_enqueue_scripts', array( '\Doofinder\WP\Doofinder_For_WordPress', 'load_only_doofinder_admin_scripts_and_styles' ), 10, 2 );
 add_action( 'plugins_loaded', array( '\Doofinder\WP\Doofinder_For_WordPress', 'instance' ), 0 );

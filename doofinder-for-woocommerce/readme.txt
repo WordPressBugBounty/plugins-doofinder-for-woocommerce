@@ -1,13 +1,13 @@
 === DOOFINDER Search and Discovery for WP & WooCommerce ===
 Contributors: Doofinder
 Tags: search, autocomplete
-Version: 2.10.1
+Version: 2.10.12
 Requires at least: 5.6
-Tested up to: 6.8
+Tested up to: 6.9
 Requires PHP: 7.0
-Stable tag: 2.10.1
-License: GPLv2 or later
-License URI: http://www.gnu.org/licenses/gpl-2.0.html
+Stable tag: 2.10.12
+License: MIT
+License URI: https://opensource.org/licenses/MIT
 
 This plugin integrates the Doofinder search service with your WordPress site.
 
@@ -125,6 +125,40 @@ For in-depth insights into Doofinder and its features, check out our comprehensi
 You can report security bugs through the Patchstack Vulnerability Disclosure Program. The Patchstack team help validate, triage and handle any security vulnerabilities. [Report a security vulnerability.](https://patchstack.com/database/vdp/doofinder-for-woocommerce)
 
 == Changelog ==
+
+= 2.10.12 =
+- Added purchase_price (Cost of Goods in WooCommerce) to the Doofinder product endpoint.
+
+= 2.10.11 =
+- Added stock_quantity to the Doofinder product endpoint.
+
+= 2.10.10 =
+- Fix WooPayments multi-currency price conversion for Doofinder requests. Prices are now returned in the store's default currency instead of being converted based on request geolocation.
+
+= 2.10.9 =
+- Small fix in upgrader function.
+
+= 2.10.8 =
+- Tested features with WordPress 6.9
+- Fixed script activation in multilanguage WordPress sites. Now its state is synchronized for every language.
+
+= 2.10.7 =
+- Index only published variations.
+
+= 2.10.6 =
+- Add images links to products.
+
+= 2.10.5 =
+- Avoid sending lang to the API requests if the multilanguage plugin is not supported. 
+
+= 2.10.4 =
+- Fix issue that prevented non-latin characters in attributes to be properly handled
+
+= 2.10.3 =
+- Fix issue grouping variants when the type is variable instead of variation
+
+= 2.10.2 =
+- Fix bug that prevented proper update on save in multilanguage contexts for custom endpoint
 
 = 2.10.1 =
 - Supress PHP warning in the custom endpoint when a product's featured image lacks a 'medium' size and fallbacks to the first image available.

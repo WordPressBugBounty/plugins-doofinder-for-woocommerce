@@ -9,6 +9,7 @@ ini_set( 'serialize_precision', '-1' ); // phpcs:ignore WordPress.PHP.IniSet
 
 use Doofinder\WP\Endpoints;
 use Doofinder\WP\Helpers\Helpers;
+use Doofinder\WP\Multilanguage;
 use Doofinder\WP\Settings;
 use Doofinder\WP\Thumbnail;
 
@@ -35,6 +36,7 @@ class Endpoint_Product {
 		'group_id',
 		'id',
 		'image_link',
+		'images_links',
 		'link',
 		'meta_data',
 		'name',
@@ -48,6 +50,7 @@ class Endpoint_Product {
 		'sku',
 		'status',
 		'slug',
+		'stock_quantity',
 		'stock_status',
 		'tags',
 		'type',
@@ -89,6 +92,7 @@ class Endpoint_Product {
 
 		$custom_attr        = Settings::get_custom_attributes();
 		$custom_attr_fields = self::get_field_attributes( $custom_attr );
+		$multilanguage      = Multilanguage::instance();
 
 		if ( ! $config_request ) {
 			Endpoints::check_secure_token();
@@ -101,18 +105,25 @@ class Endpoint_Product {
 			$config_request = array(
 				'per_page' => $request->get_param( 'per_page' ) ?? self::PER_PAGE,
 				'page'     => $request->get_param( 'page' ) ?? 1,
-				'lang'     => $lang_code,
 				'ids'      => $request->get_param( 'ids' ) ?? '',
 				'orderby'  => $request->get_param( 'orderby' ) ?? 'id',
 				'order'    => $request->get_param( 'order' ) ?? 'desc',
 				'fields'   => $fields,
 			);
+
+			if ( $multilanguage->is_active() ) {
+				$locale_or_lang_code    = $request->get_param( 'lang' ) ?? '';
+				$lang_code              = Helpers::apply_locale_to_rest_context( $locale_or_lang_code );
+				$config_request['lang'] = $lang_code;
+			}
 		} else {
 			// Update on save.
 
-			// Apply locale context even when config_request is provided.
-			$locale_or_lang_code = $config_request['lang'] ?? '';
-			$lang_code           = Helpers::apply_locale_to_rest_context( $locale_or_lang_code );
+			if ( $multilanguage->is_active() ) {
+				// Apply locale context even when config_request is provided.
+				$locale_or_lang_code = $config_request['lang'] ?? '';
+				Helpers::apply_locale_to_rest_context( $locale_or_lang_code );
+			}
 
 			$fields_param             = $config_request['fields'] ?? '';
 			$fields                   = ! empty( $fields_param ) ? explode( ',', $fields_param ) : array();
@@ -142,18 +153,25 @@ class Endpoint_Product {
 				// Filter fields.
 				$filtered_product_data = ! empty( $fields ) ? array_intersect_key( $product_data, array_flip( $fields ) ) : $product_data;
 
-				$filtered_product_data = self::set_indexable( $filtered_product_data, $indexable_opt );
-				$filtered_product_data = self::get_category_merchandising( $filtered_product_data );
-				$filtered_product_data = self::get_categories( $filtered_product_data );
-				$filtered_product_data = self::merge_custom_attributes( $filtered_product_data, $custom_attr );
-				$filtered_product_data = self::get_image_field( $filtered_product_data );
-				$filtered_product_data = self::format_prices( $filtered_product_data );
-				$filtered_product_data = self::check_stock_status( $filtered_product_data );
-				$filtered_product_data = self::get_description( $filtered_product_data );
-				$filtered_product_data = self::get_short_description( $filtered_product_data );
-				$filtered_product_data = self::get_tags( $filtered_product_data );
-				$filtered_product_data = self::get_meta_attributes( $filtered_product_data, $custom_attr );
-				$filtered_product_data = self::clean_fields( $filtered_product_data );
+				$filtered_product_data['df_indexable'] = $indexable_opt;
+				$filtered_product_data                 = self::get_category_merchandising( $filtered_product_data );
+				if ( isset( $filtered_product_data['categories'] ) ) {
+					$filtered_product_data['categories'] = self::get_category_path( $filtered_product_data['categories'] );
+				} else {
+					$filtered_product_data['categories'] = array();
+				}
+				$filtered_product_data               = self::merge_custom_attributes( $filtered_product_data, $custom_attr );
+				$filtered_product_data['image_link'] = self::get_image_link( $filtered_product_data['id'] );
+				unset( $filtered_product_data['images'] );
+				$filtered_product_data['images_links']      = self::get_images_links( $filtered_product_data );
+				$filtered_product_data                      = self::format_prices( $filtered_product_data );
+				$filtered_product_data                      = self::check_availability( $filtered_product_data );
+				$filtered_product_data['description']       = self::process_content( $filtered_product_data['description'] );
+				$filtered_product_data['short_description'] = self::process_content( $filtered_product_data['short_description'] );
+				$filtered_product_data['tags']              = self::get_tag_names( $filtered_product_data['tags'] );
+				$filtered_product_data['purchase_price']    = self::get_purchase_price( $filtered_product_data['id'] );
+				$filtered_product_data                      = self::get_meta_attributes( $filtered_product_data, $custom_attr );
+				$filtered_product_data                      = self::clean_fields( $filtered_product_data );
 
 				$modified_products[] = $filtered_product_data;
 			}
@@ -244,31 +262,28 @@ class Endpoint_Product {
 	}
 
 	/**
-	 * Set indexable option.
+	 * Get the purchase price (Cost of Goods in WooCommerce) of a product.
 	 *
-	 * @param array  $data   The data to process.
-	 * @param string $indexable The indexable option.
-	 * @return array The processed data.
+	 * For simple products, the purchase price is stored in the _wc_cog_cost meta field.
+	 * but for variable products, the purchase price is stored in the _wc_cog_cost_variable meta field.
+	 *
+	 * @see https://woocommerce.com/document/cost-of-goods-sold/#section-19
+	 *
+	 * @param int $product_id The ID of the product.
+	 * @return float|null The purchase price of the product or null if not a numeric value.
 	 */
-	private static function set_indexable( $data, $indexable ) {
-		$data['df_indexable'] = $indexable;
-		return $data;
-	}
-
-	/**
-	 * Get categories in the data.
-	 *
-	 * @param array $data The data to process.
-	 *
-	 * @return array The processed data.
-	 */
-	private static function get_categories( $data ) {
-		if ( isset( $data['categories'] ) ) {
-			$data['categories'] = self::get_category_path( $data['categories'] );
-		} else {
-			$data['categories'] = array();
+	private static function get_purchase_price( $product_id ) {
+		$purchase_price = get_post_meta( $product_id, '_wc_cog_cost', true );
+		if ( is_numeric( $purchase_price ) ) {
+			return (float) $purchase_price;
 		}
-		return $data;
+
+		$purchase_price_for_variations = get_post_meta( $product_id, '_wc_cog_cost_variable', true );
+		if ( is_numeric( $purchase_price_for_variations ) ) {
+			return (float) $purchase_price_for_variations;
+		}
+
+		return null;
 	}
 
 	/**
@@ -389,63 +404,8 @@ class Endpoint_Product {
 		return $data_with_attr;
 	}
 
-	/**
-	 * Get the image link in the data.
-	 *
-	 * @param array $data   The data to process.
-	 *
-	 * @return array The processed data.
-	 */
-	private static function get_image_field( $data ) {
-		return self::clear_images_fields( $data );
-	}
 
-	/**
-	 * Check the stock status in the data.
-	 *
-	 * @param array $data   The data to check.
-	 *
-	 * @return array The processed data.
-	 */
-	private static function check_stock_status( $data ) {
-		return self::check_availability( $data );
-	}
 
-	/**
-	 * Process the description field in the data.
-	 *
-	 * @param array $data   The data to process.
-	 *
-	 * @return array The processed data.
-	 */
-	private static function get_description( $data ) {
-		$data['description'] = self::process_content( $data['description'] );
-		return $data;
-	}
-
-	/**
-	 * Process the short description field in the data.
-	 *
-	 * @param array $data   The data to process.
-	 *
-	 * @return array The processed data.
-	 */
-	private static function get_short_description( $data ) {
-		$data['short_description'] = self::process_content( $data['short_description'] );
-		return $data;
-	}
-
-	/**
-	 * Get tags in the data.
-	 *
-	 * @param array $data   The data to process.
-	 *
-	 * @return array The processed data.
-	 */
-	private static function get_tags( $data ) {
-		$data['tags'] = self::get_tag_names( $data['tags'] );
-		return $data;
-	}
 
 	/**
 	 * Retrieves an array of names from a given array.
@@ -638,6 +598,44 @@ class Endpoint_Product {
 	}
 
 	/**
+	 * Returns an array of images links for a given product.
+	 * For regular products: returns all gallery images with the main image first.
+	 * For variant products: returns an array with the same content as image_link
+	 *
+	 * @param array $product The product array.
+	 *
+	 * @return array The array of images links.
+	 */
+	private static function get_images_links( $product ) {
+		$product_id   = $product['id'];
+		$images_links = array( $product['image_link'] );
+		if ( isset( $product['type'] ) && 'variation' === $product['type'] ) {
+			return $images_links;
+		}
+
+		$image_size         = Thumbnail::get_size();
+		$gallery_ids_string = get_post_meta( $product_id, '_product_image_gallery', true );
+		if ( ! empty( $gallery_ids_string ) ) {
+			$gallery_ids = explode( ',', $gallery_ids_string );
+			foreach ( $gallery_ids as $attachment_id ) {
+				$image_src = wp_get_attachment_image_src( (int) $attachment_id, $image_size );
+				if ( false === $image_src ) {
+					continue;
+				}
+
+				$image_link = $image_src[0];
+				$image_link = self::add_base_url_if_needed( $image_link );
+
+				if ( ! in_array( $image_link, $images_links, true ) ) {
+					$images_links[] = $image_link;
+				}
+			}
+		}
+
+		return $images_links;
+	}
+
+	/**
 	 * Check that image link is absolute, if not, add the site url
 	 *
 	 * @param string $image_link URL of the image.
@@ -669,13 +667,6 @@ class Endpoint_Product {
 			unset( $product['parent_id'] );
 		}
 
-		$product = array_filter(
-			$product,
-			function ( $value ) {
-				return ! is_null( $value );
-			}
-		);
-
 		return $product;
 	}
 
@@ -696,19 +687,6 @@ class Endpoint_Product {
 		return $product;
 	}
 
-	/**
-	 * Clears image fields from a product array.
-	 *
-	 * @param array $product The product array to process.
-	 *
-	 * @return array The product array with empty image fields removed.
-	 */
-	private static function clear_images_fields( $product ) {
-		$product['image_link'] = self::get_image_link( $product['id'] );
-		unset( $product['images'] );
-
-		return $product;
-	}
 
 	/**
 	 * Groups variants under their parent product, adds the 'variants' array to the parent,
@@ -813,7 +791,14 @@ class Endpoint_Product {
 		$variations_data = self::request_variations( $product['id'] );
 
 		foreach ( $variations_data as &$variation ) {
-			$variation         = array_merge( $product, $variation ?? array(), array( 'parent_id' => $product['id'] ) );
+			$variation         = array_merge(
+				$product,
+				$variation ?? array(),
+				array(
+					'parent_id' => $product['id'],
+					'type'      => 'variation',
+				)
+			);
 			$variation['name'] = $product['name'];
 		}
 		return $variations_data;
@@ -836,6 +821,7 @@ class Endpoint_Product {
 				array(
 					'page'     => $page,
 					'per_page' => self::PER_PAGE,
+					'status'   => 'publish',
 				)
 			);
 			$variants_response            = rest_do_request( $request );
@@ -930,6 +916,9 @@ class Endpoint_Product {
 
 		foreach ( $product_attributes as $attribute_name => $attribute_data ) {
 			$attribute_slug = str_replace( 'pa_', '', $attribute_name );
+
+			// URL decode the attribute slug.
+			$attribute_slug = urldecode( $attribute_slug );
 			$found_key      = array_search( $attribute_slug, array_column( $custom_attr, 'attribute' ), true );
 
 			// If the slug was not found, it is because the field has been renamed in the plugin's DooFinder panel.
@@ -942,6 +931,9 @@ class Endpoint_Product {
 				$attribute_options                    = is_string( $attribute_data ) ? array( $attribute_data ) : $attribute_data->get_slugs();
 				$custom_attributes[ $attribute_slug ] = array();
 				foreach ( $attribute_options as $option ) {
+					// URL decode the option value.
+					$option = urldecode( $option );
+
 					// If it is an attribute with taxonomy, we need to get taxonomy value.
 					if ( taxonomy_exists( $attribute_name ) ) {
 						$term   = get_term_by( 'slug', $option, $attribute_name );
