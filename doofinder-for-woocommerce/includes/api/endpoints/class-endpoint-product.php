@@ -23,41 +23,38 @@ class Endpoint_Product {
 	const PER_PAGE = 100;
 	const CONTEXT  = 'doofinder/v1';
 	const ENDPOINT = '/product';
-	const FIELDS   = array(
+
+	/**
+	 * Fields left out of the response.
+	 *
+	 * Only wrappers, traps and duplicates of something already emitted belong here. Deciding
+	 * which fields are worth indexing is the search engine's job, so this is not the place to
+	 * drop a field for being uninteresting.
+	 */
+	const EXCLUDED_FIELDS = array(
+		'image',
+		'gallery_image_ids',
+		'images',
 		'attributes',
-		'average_rating',
-		'best_price',
-		'catalog_visibility',
-		'categories',
-		'date_created',
-		'description',
-		'df_group_leader',
-		'df_indexable',
-		'df_variants_information',
-		'group_id',
-		'id',
-		'image_link',
-		'images_links',
-		'link',
 		'meta_data',
-		'name',
-		'parent_id',
-		'permalink',
-		'price',
-		'purchasable',
-		'regular_price',
-		'sale_price',
-		'short_description',
-		'sku',
-		'status',
-		'slug',
-		'stock_quantity',
-		'stock_status',
-		'tags',
-		'type',
+		'dimensions',
+		'_links',
+		'post_password',
 	);
 
 	const TAXONOMY = 'product_cat';
+
+	// Prefix every metafield gets, so its key can be kept verbatim without colliding with anything else.
+	const META_PREFIX = 'meta_';
+
+	// WooCommerce's own product taxonomies, left out of the emitted ones.
+	const EXCLUDED_TAXONOMIES = array(
+		'product_cat',
+		'product_tag',
+		'product_type',
+		'product_visibility',
+		'product_shipping_class',
+	);
 
 	/**
 	 * Initialize the custom product endpoint.
@@ -117,14 +114,11 @@ class Endpoint_Product {
 	public static function custom_product_endpoint( $request, $config_request = false ) {
 		ob_start();
 
-		$custom_attr        = Settings::get_custom_attributes();
-		$custom_attr_fields = self::get_field_attributes( $custom_attr );
-		$multilanguage      = Multilanguage::instance();
+		$custom_attr   = Settings::get_custom_attributes();
+		$multilanguage = Multilanguage::instance();
 
 		if ( ! $config_request ) {
 			Endpoints::check_secure_token();
-
-			$fields = ( 'all' === $request->get_param( 'fields' ) ) ? array() : array_merge( self::get_fields(), array_values( $custom_attr_fields ) );
 
 			$locale_or_lang_code = $request->get_param( 'lang' ) ?? '';
 			$lang_code           = Helpers::apply_locale_to_rest_context( $locale_or_lang_code );
@@ -135,7 +129,6 @@ class Endpoint_Product {
 				'ids'      => $request->get_param( 'ids' ) ?? '',
 				'orderby'  => $request->get_param( 'orderby' ) ?? 'id',
 				'order'    => $request->get_param( 'order' ) ?? 'desc',
-				'fields'   => $fields,
 			);
 
 			if ( $multilanguage->is_active() ) {
@@ -143,24 +136,14 @@ class Endpoint_Product {
 				$lang_code              = Helpers::apply_locale_to_rest_context( $locale_or_lang_code );
 				$config_request['lang'] = $lang_code;
 			}
-		} else {
-			// Update on save.
-
-			if ( $multilanguage->is_active() ) {
-				// Apply locale context even when config_request is provided.
-				$locale_or_lang_code = $config_request['lang'] ?? '';
-				Helpers::apply_locale_to_rest_context( $locale_or_lang_code );
-			}
-
-			$fields_param             = $config_request['fields'] ?? '';
-			$fields                   = ! empty( $fields_param ) ? explode( ',', $fields_param ) : array();
-			$fields                   = array_merge( $fields, array_values( $custom_attr_fields ) );
-			$config_request['fields'] = $fields;
+		} elseif ( $multilanguage->is_active() ) {
+			// Update on save: apply locale context even when config_request is provided.
+			$locale_or_lang_code = $config_request['lang'] ?? '';
+			Helpers::apply_locale_to_rest_context( $locale_or_lang_code );
 		}
 
 		// Retrieve the original product data.
 		$products          = self::get_products( $config_request );
-		$custom_attr       = Settings::get_custom_attributes();
 		$modified_products = array();
 
 		// Process and filter product data.
@@ -177,8 +160,7 @@ class Endpoint_Product {
 
 				$indexable_opt = get_post_meta( $product_data['id'], '_doofinder_for_wp_indexing_visibility', true );
 
-				// Filter fields.
-				$filtered_product_data = ! empty( $fields ) ? array_intersect_key( $product_data, array_flip( $fields ) ) : $product_data;
+				$filtered_product_data = $product_data;
 
 				$filtered_product_data['df_indexable'] = $indexable_opt;
 				$filtered_product_data                 = self::get_category_merchandising( $filtered_product_data );
@@ -187,7 +169,7 @@ class Endpoint_Product {
 				} else {
 					$filtered_product_data['categories'] = array();
 				}
-				$filtered_product_data               = self::merge_custom_attributes( $filtered_product_data, $custom_attr );
+				$filtered_product_data               = self::get_attributes( $filtered_product_data );
 				$filtered_product_data['image_link'] = self::get_image_link( $filtered_product_data['id'] );
 				unset( $filtered_product_data['images'] );
 				$filtered_product_data['images_links']      = self::get_images_links( $filtered_product_data );
@@ -197,10 +179,12 @@ class Endpoint_Product {
 				$filtered_product_data['short_description'] = self::process_content( $filtered_product_data['short_description'] );
 				$filtered_product_data['tags']              = self::get_tag_names( $filtered_product_data['tags'] );
 				$filtered_product_data['purchase_price']    = self::get_purchase_price( $filtered_product_data['id'] );
-				$filtered_product_data                      = self::get_meta_attributes( $filtered_product_data, $custom_attr );
+				$filtered_product_data                      = self::get_meta_attributes( $filtered_product_data );
 				$filtered_product_data['creation_date']     = gmdate( 'Y-m-d\TH:i:s\Z', strtotime( $filtered_product_data['date_created'] ) );
 				$taxonomy_lookup_id                         = ( 'variation' === ( $filtered_product_data['type'] ?? '' ) && ! empty( $filtered_product_data['parent_id'] ) ) ? $filtered_product_data['parent_id'] : $filtered_product_data['id'];
-				$filtered_product_data                      = array_merge( $filtered_product_data, self::get_taxonomy_custom_attributes( $taxonomy_lookup_id, $custom_attr ) );
+				$filtered_product_data                      = array_merge( $filtered_product_data, self::get_taxonomy_attributes( $taxonomy_lookup_id ) );
+				$filtered_product_data                      = self::flatten_structures( $filtered_product_data );
+				$filtered_product_data                      = self::apply_legacy_aliases( $filtered_product_data, $custom_attr );
 				$filtered_product_data                      = self::clean_fields( $filtered_product_data );
 
 				$modified_products[] = $filtered_product_data;
@@ -217,28 +201,80 @@ class Endpoint_Product {
 	}
 
 	/**
-	 * Get the array of custom attributes name fields.
+	 * Prefix a field name with `custom_` when it would collide with a canonical field.
 	 *
-	 * @param array $custom_attrs Array of custom attributes.
+	 * An extracted field is named after its source, so without this one of them could be
+	 * called `price` and overwrite the canonical field of that name.
 	 *
-	 * @return array The array of fields.
+	 * @param string $name The candidate field name.
+	 * @return string The same name, or prefixed with `custom_` if it is a reserved one.
 	 */
-	public static function get_field_attributes( $custom_attrs ) {
-
-		$custom_fields = array();
-		foreach ( $custom_attrs as $custom_attr ) {
-			$custom_fields[ $custom_attr['field'] ] = $custom_attr['attribute'];
-		}
-		return $custom_fields;
+	private static function reserved_safe_name( $name ) {
+		return in_array( $name, Settings::RESERVED_CUSTOM_ATTRIBUTES_NAMES, true ) ? 'custom_' . $name : $name;
 	}
 
 	/**
-	 * Get the array of fields.
+	 * Build the output field name of a WooCommerce attribute.
 	 *
-	 * @return array The array of fields.
+	 * Keeps the `pa_` prefix, since `pa_color` is the attribute's internal name, and URL-decodes
+	 * the key because non-ASCII attribute taxonomies are stored encoded (`pa_tama%c3%b1o`).
+	 *
+	 * @param string $attribute_name The attribute key, as returned by `WC_Product::get_attributes()`.
+	 * @return string The field name, or an empty string when the name is unusable.
 	 */
-	public static function get_fields() {
-		return self::FIELDS;
+	private static function attribute_field_name( $attribute_name ) {
+		$name = strtolower( trim( urldecode( (string) $attribute_name ) ) );
+
+		return '' === $name ? '' : self::reserved_safe_name( $name );
+	}
+
+	/**
+	 * Build the name of a metafield, without the output prefix.
+	 *
+	 * The key is kept as it is stored, leading underscores included: `_sku` and `sku` are two
+	 * different metafields and have to stay apart. The emitted field adds `META_PREFIX`, which
+	 * is also what makes a `custom_` guard unnecessary here — no prefixed name can reach a
+	 * canonical field.
+	 *
+	 * @param string $meta_key The meta key, as stored in `wp_postmeta`.
+	 * @return string The metafield name, or an empty string when the key is unusable.
+	 */
+	private static function meta_field_name( $meta_key ) {
+		return strtolower( trim( urldecode( (string) $meta_key ) ) );
+	}
+
+	/**
+	 * Build the output field name of a metafield.
+	 *
+	 * @param string $meta_key The meta key, as stored in `wp_postmeta`.
+	 * @return string The field name, or an empty string when the key is unusable.
+	 */
+	private static function meta_output_field_name( $meta_key ) {
+		$name = self::meta_field_name( $meta_key );
+
+		return '' === $name ? '' : self::META_PREFIX . $name;
+	}
+
+	/**
+	 * Shape a metafield value into something indexable.
+	 *
+	 * @param mixed $value The raw meta value.
+	 * @return mixed A scalar, a list of scalars, or a JSON string for anything nested.
+	 */
+	private static function format_meta_value( $value ) {
+		if ( null === $value ) {
+			return '';
+		}
+
+		if ( is_scalar( $value ) ) {
+			return $value;
+		}
+
+		if ( is_array( $value ) && count( $value ) === count( array_filter( $value, 'is_scalar' ) ) ) {
+			return array_values( $value );
+		}
+
+		return wp_json_encode( $value );
 	}
 
 	/**
@@ -252,9 +288,8 @@ class Endpoint_Product {
 	public static function get_data( $ids, $lang ) {
 
 		$request_params = array(
-			'ids'    => implode( ',', $ids ),
-			'fields' => implode( ',', self::get_fields() ),
-			'lang'   => $lang,
+			'ids'  => implode( ',', $ids ),
+			'lang' => $lang,
 		);
 
 		$items = self::custom_product_endpoint( false, $request_params )->data;
@@ -272,25 +307,34 @@ class Endpoint_Product {
 	}
 
 	/**
-	 * Get custom meta fields data from a WooCommerce product.
+	 * Get every metafield of the product as a flat field, named `meta_` plus its key.
 	 *
-	 * @param array $data        The data to merge into.
-	 * @param array $custom_attr The custom attributes to merge.
-	 * @return array The merged data.
+	 * `meta_data` is what WooCommerce exposes, so its own internal meta is already left out.
+	 *
+	 * When the same metafield appears more than once the assignment simply overwrites, so the
+	 * last row wins. WooCommerce reads meta ordered by `meta_id`, so that is the most recently
+	 * written value, and it is what the plugin emitted before.
+	 *
+	 * @param array $data The product data, including its raw `meta_data`.
+	 * @return array The data with one flat field per metafield, and `meta_data` removed.
 	 */
-	private static function get_meta_attributes( $data, $custom_attr ) {
-		foreach ( $custom_attr as $attr ) {
-			if ( 'metafield' !== $attr['type'] ) {
+	private static function get_meta_attributes( $data ) {
+		if ( empty( $data['meta_data'] ) || ! is_array( $data['meta_data'] ) ) {
+			unset( $data['meta_data'] );
+			return $data;
+		}
+
+		foreach ( $data['meta_data'] as $meta ) {
+			$meta_data = is_object( $meta ) && method_exists( $meta, 'get_data' ) ? $meta->get_data() : (array) $meta;
+			$field     = self::meta_output_field_name( $meta_data['key'] ?? '' );
+
+			if ( '' === $field ) {
 				continue;
 			}
 
-			foreach ( $data['meta_data'] as $meta ) {
-				$meta_data = $meta->get_data();
-				if ( $attr['attribute'] === $meta_data['key'] ) {
-					$data[ $attr['field'] ] = $meta_data['value'] ?? '';
-				}
-			}
+			$data[ $field ] = self::format_meta_value( $meta_data['value'] ?? '' );
 		}
+
 		unset( $data['meta_data'] );
 		return $data;
 	}
@@ -385,57 +429,176 @@ class Endpoint_Product {
 	}
 
 	/**
-	 * Merge custom attributes into the data.
+	 * Get every WooCommerce attribute of the product as a flat field.
 	 *
-	 * @param array $data        The data to merge into.
-	 * @param array $custom_attr The custom attributes to merge.
-	 * @return array The merged data.
+	 * Taxonomy-backed attributes are resolved to their term names.
+	 *
+	 * @param array $data The product data.
+	 * @return array The data with one field per attribute.
 	 */
-	private static function merge_custom_attributes( $data, $custom_attr ) {
-		// Filter out metafield custom attributes and variants attributes.
-		$custom_attr = array_values(
-			array_filter(
-				$custom_attr,
-				function ( $attr ) use ( $data ) {
-					return isset( $attr['type'] ) &&
-						'metafield' !== $attr['type'] && ( empty( $data['df_variants_information'] ) ||
-						! in_array( $attr['field'], $data['df_variants_information'], true ) );
-				}
-			)
-		);
+	private static function get_attributes( $data ) {
+		$wc_product = wc_get_product( $data['id'] );
 
-		if ( empty( $custom_attr ) ) {
+		if ( ! is_a( $wc_product, 'WC_Product' ) ) {
 			return $data;
 		}
 
-		$data_with_attr = array_merge( self::get_custom_attributes( $data['id'], $custom_attr ), $data );
+		$is_variation = 'variation' === ( $data['type'] ?? '' );
 
-		foreach ( $custom_attr as $custom ) {
-			$attribute_key = $custom['attribute'];
-			$field_key     = $custom['field'];
+		foreach ( $wc_product->get_attributes() as $attribute_name => $attribute_data ) {
+			$field = self::attribute_field_name( $attribute_name );
 
-			if ( ! isset( $data_with_attr[ $attribute_key ] ) ) {
+			if ( '' === $field || isset( $data[ $field ] ) ) {
 				continue;
 			}
 
-			// Exchange renamed fields.
-			$data_with_attr[ $field_key ] = $data_with_attr[ $attribute_key ];
-
-			// We delete the original key only if it has been renamed to a different alias.
-			if ( $field_key !== $attribute_key ) {
-				unset( $data_with_attr[ $attribute_key ] );
+			// On the parent this only holds the list of options, already in `df_variants_information`.
+			if ( ! $is_variation && is_object( $attribute_data ) && $attribute_data->get_variation() ) {
+				continue;
 			}
 
-			// List of value options.
-			if ( is_array( $data_with_attr[ $field_key ] ) ) {
-				$name_column = array_column( $data_with_attr[ $field_key ], 'name' );
+			$options = is_string( $attribute_data ) ? array( $attribute_data ) : $attribute_data->get_slugs();
+			$values  = array();
 
-				if ( ! empty( $name_column ) ) {
-					$data_with_attr[ $field_key ] = $name_column;
+			foreach ( $options as $option ) {
+				$option = urldecode( $option );
+
+				// If it is an attribute with taxonomy, we need to get taxonomy value.
+				if ( taxonomy_exists( $attribute_name ) ) {
+					$term   = get_term_by( 'slug', $option, $attribute_name );
+					$option = $term ? preg_replace( '/(?<!\/)\/(?!\/)/', '//', html_entity_decode( wp_strip_all_tags( $term->name ) ) ) : '';
+				}
+
+				if ( '' === $option ) {
+					continue;
+				}
+
+				$values[] = $option;
+			}
+
+			if ( empty( $values ) ) {
+				continue;
+			}
+
+			$data[ $field ] = ( 1 === count( $values ) ) ? $values[0] : $values;
+		}
+
+		return $data;
+	}
+
+	/**
+	 * Rename the emitted fields to the names the merchant has stored.
+	 *
+	 * A merchant who configured a field has a name stored for it, and their search
+	 * configuration points at that name.
+	 *
+	 * The removal happens after every name has been copied, not inside the loop: two rows may
+	 * point at the same source, and dropping the key on the first would leave the second empty.
+	 *
+	 * @param array $product     The product array to process.
+	 * @param array $custom_attr The stored name map.
+	 * @return array The product with the stored names applied.
+	 */
+	private static function apply_legacy_aliases( $product, $custom_attr ) {
+		$renamed = array();
+
+		foreach ( $custom_attr as $attr ) {
+			$alias  = $attr['field'] ?? '';
+			$type   = $attr['type'] ?? '';
+			$source = self::legacy_source_field_name( $attr['attribute'] ?? '', $type );
+
+			// The stored map names the metafield, not the field it is emitted under, so the
+			// prefix is added here and not in `legacy_source_field_name`.
+			$emitted = 'metafield' === $type ? self::META_PREFIX . $source : $source;
+
+			if ( '' === $alias || '' === $source || $alias === $emitted ) {
+				continue;
+			}
+
+			// Do not overwrite a field that already exists under the stored name.
+			if ( isset( $product[ $alias ] ) || ! isset( $product[ $emitted ] ) ) {
+				continue;
+			}
+
+			$product[ $alias ] = $product[ $emitted ];
+			$renamed[]         = $emitted;
+		}
+
+		foreach ( $renamed as $emitted_field ) {
+			unset( $product[ $emitted_field ] );
+		}
+
+		return $product;
+	}
+
+	/**
+	 * Resolve the source a stored entry refers to.
+	 *
+	 * The settings UI stored an identifier of its own dropdown, not a field name, so it has to
+	 * be translated into the name of the thing it points at. For a metafield that is its key;
+	 * the `META_PREFIX` of the emitted field is the caller's business.
+	 *
+	 * @param string $source The stored `attribute` value (e.g. `wc_2`, `taxonomy_series`, a meta key).
+	 * @param string $type   The stored `type` value.
+	 * @return string The source name, or an empty string when it cannot be resolved.
+	 */
+	private static function legacy_source_field_name( $source, $type ) {
+		if ( 'wc_attribute' === $type && str_starts_with( $source, 'wc_' ) ) {
+			$attribute_id = (int) substr( $source, strlen( 'wc_' ) );
+
+			foreach ( wc_get_attribute_taxonomies() as $attribute_taxonomy ) {
+				if ( (int) $attribute_taxonomy->attribute_id === $attribute_id ) {
+					return self::attribute_field_name( wc_attribute_taxonomy_name( $attribute_taxonomy->attribute_name ) );
 				}
 			}
+
+			return '';
 		}
-		return $data_with_attr;
+
+		if ( 'taxonomy' === $type ) {
+			$slug = str_starts_with( $source, 'taxonomy_' ) ? substr( $source, strlen( 'taxonomy_' ) ) : $source;
+
+			return self::reserved_safe_name( $slug );
+		}
+
+		// The dimensions entries are stored as `dimensions:length` and flattened to `length`.
+		if ( 'base_attribute' === $type && str_starts_with( $source, 'dimensions:' ) ) {
+			$dimension = substr( $source, strlen( 'dimensions:' ) );
+
+			return in_array( $dimension, array( 'length', 'width', 'height' ), true )
+				? self::reserved_safe_name( $dimension )
+				: '';
+		}
+
+		return self::meta_field_name( $source );
+	}
+
+	/**
+	 * Get the field name to report in `df_variants_information` for a variation attribute.
+	 *
+	 * The node has to name the fields the same way they are emitted, so the stored name wins
+	 * when the merchant has one.
+	 *
+	 * @param array $product_attribute An attribute entry of the product REST response.
+	 * @param array $custom_attr       The stored name map.
+	 * @return string The field name.
+	 */
+	private static function variant_attribute_field_name( $product_attribute, $custom_attr ) {
+		$emitted = self::attribute_field_name( $product_attribute['slug'] );
+
+		foreach ( $custom_attr as $attr ) {
+			$alias = $attr['field'] ?? '';
+
+			if ( '' === $alias || $alias === $emitted ) {
+				continue;
+			}
+
+			if ( self::legacy_source_field_name( $attr['attribute'] ?? '', $attr['type'] ?? '' ) === $emitted ) {
+				return $alias;
+			}
+		}
+
+		return $emitted;
 	}
 
 
@@ -486,7 +649,6 @@ class Endpoint_Product {
 				'per_page' => $config['per_page'] ?? self::PER_PAGE,
 				'lang'     => $config['lang'] ?? '',
 				'status'   => 'publish',
-				'_fields'  => $config['fields'],
 				'include'  => $config['ids'],
 				'orderby'  => $config['orderby'] ?? 'id',
 				'order'    => $config['order'] ?? 'desc',
@@ -693,13 +855,54 @@ class Endpoint_Product {
 		$product['title'] = $product['name'];
 		$product['link']  = $product['permalink'];
 
-		unset( $product['attributes'] );
+		foreach ( self::EXCLUDED_FIELDS as $excluded_field ) {
+			unset( $product[ $excluded_field ] );
+		}
+
 		unset( $product['name'] );
 		unset( $product['permalink'] );
 		unset( $product['date_created'] );
 
 		if ( empty( $product['parent_id'] ) ) {
 			unset( $product['parent_id'] );
+		}
+
+		return $product;
+	}
+
+	/**
+	 * Flatten the nested structures WooCommerce returns into indexable fields.
+	 *
+	 * Any field holding a list of objects that carry a `name` becomes the list of those names.
+	 * The check is on the value, so there is no list of fields to keep in step with WooCommerce.
+	 * Metafields are left out of it: their value is the merchant's own and travels as it comes.
+	 *
+	 * `dimensions` needs naming its parts, which cannot be read off the value, so it keeps its
+	 * own case. Its key is left in place because a merchant may have a stored name for it and
+	 * `apply_legacy_aliases` has to find it; what is left afterwards is dropped as excluded.
+	 *
+	 * @param array $product The product array to process.
+	 * @return array The product with its nested structures flattened.
+	 */
+	private static function flatten_structures( $product ) {
+		if ( ! empty( $product['dimensions'] ) && is_array( $product['dimensions'] ) ) {
+			foreach ( array( 'length', 'width', 'height' ) as $dimension ) {
+				if ( isset( $product['dimensions'][ $dimension ] ) && '' !== $product['dimensions'][ $dimension ] ) {
+					$product[ self::reserved_safe_name( $dimension ) ] = $product['dimensions'][ $dimension ];
+				}
+			}
+		}
+
+		foreach ( $product as $field => $value ) {
+			if ( ! is_array( $value ) || str_starts_with( (string) $field, self::META_PREFIX ) ) {
+				continue;
+			}
+
+			$names = array_column( $value, 'name' );
+
+			if ( ! empty( $names ) ) {
+				$product[ $field ] = $names;
+			}
 		}
 
 		return $product;
@@ -888,189 +1091,78 @@ class Endpoint_Product {
 		);
 
 		$custom_attributes_mapping = Settings::get_custom_attributes();
-		$custom_attr_fields        = self::get_field_attributes( $custom_attributes_mapping );
 
 		$variation_attributes = array();
 		foreach ( $attributes as $p_attr ) {
 			$slug = strtolower( str_replace( 'pa_', '', $p_attr['slug'] ) );
 			if ( $p_attr['variation'] && ( in_array( $slug, $product_attributes, true ) ) ) {
-				$attribute              = self::get_real_product_attribute_name( $p_attr, $custom_attr_fields );
-				$variation_attributes[] = $attribute;
+				$variation_attributes[] = self::variant_attribute_field_name( $p_attr, $custom_attributes_mapping );
 			}
 		}
 		return $variation_attributes;
 	}
 
 	/**
-	 * Retrieves the mapped custom name for a WooCommerce product attribute.
+	 * Get the terms of every product taxonomy as a flat field.
 	 *
-	 * This function checks if a WooCommerce product attribute ID is mapped to a custom name
-	 * specified in the Data Configuration tab. If a custom name is found, it returns that name.
-	 * Otherwise, it returns the lowercase version of the original attribute name. Due to the
-	 * structure of the custom attributes mapping, it is necessary to flip the keys and the
-	 * values to achieve the described purpose.
+	 * The terms of all the taxonomies are fetched in a single query: asking for them one
+	 * taxonomy at a time costs one query per taxonomy per product, which grows with the number
+	 * of taxonomies the shop has.
 	 *
-	 * Example of custom attributes mapping structure:
+	 * For variations, pass the parent product ID so taxonomies are correctly retrieved.
 	 *
-	 * array(
-	 *    "size_custom"  => "wc_2",
-	 *    "color_custom" => "wc_1",
-	 *    [...]
-	 * );
-	 *
-	 * @param array $product_attribute An associative array representing the product attribute, containing:
-	 *                                 - 'id'   (int): The WooCommerce attribute ID.
-	 *                                 - 'name' (string): The default attribute name.
-	 * @param array $custom_attr_fields An associative array of custom attribute fields, where each custom name maps
-	 *                                  to a WooCommerce attribute key (e.g., 'wc_{id}').
-	 *
-	 * @return string The custom attribute name if found; otherwise, the original attribute name in lowercase.
-	 */
-	private static function get_real_product_attribute_name( $product_attribute, $custom_attr_fields ) {
-		$wc_id                      = 'wc_' . $product_attribute['id'];
-		$custom_attr_fields_mapping = array_flip( $custom_attr_fields );
-		if ( array_key_exists( $wc_id, $custom_attr_fields_mapping ) ) {
-			return $custom_attr_fields_mapping[ $wc_id ];
-		}
-
-		return strtolower( $product_attribute['name'] );
-	}
-
-	/**
-	 * Get custom attributes for a product.
-	 *
-	 * @param integer $product_id The ID of the product.
-	 * @param array   $custom_attr List of custom attributes.
-	 *
-	 * @return array The custom attributes for the product.
-	 */
-	public static function get_custom_attributes( $product_id, $custom_attr ) {
-
-		$product_attributes = self::get_all_attributes( $product_id );
-		$custom_attributes  = array();
-
-		foreach ( $product_attributes as $attribute_name => $attribute_data ) {
-			$attribute_slug = str_replace( 'pa_', '', $attribute_name );
-
-			// URL decode the attribute slug.
-			$attribute_slug = urldecode( $attribute_slug );
-			$found_key      = array_search( $attribute_slug, array_column( $custom_attr, 'attribute' ), true );
-
-			// If the slug was not found, it is because the field has been renamed in the plugin's DooFinder panel.
-			if ( false === $found_key ) {
-				$attribute_slug = self::get_slug_from_map_attributes( $custom_attr, $attribute_slug );
-				$found_key      = (bool) $attribute_slug;
-			}
-
-			if ( false !== $found_key ) {
-				$attribute_options                    = is_string( $attribute_data ) ? array( $attribute_data ) : $attribute_data->get_slugs();
-				$custom_attributes[ $attribute_slug ] = array();
-				foreach ( $attribute_options as $option ) {
-					// URL decode the option value.
-					$option = urldecode( $option );
-
-					// If it is an attribute with taxonomy, we need to get taxonomy value.
-					if ( taxonomy_exists( $attribute_name ) ) {
-						$term   = get_term_by( 'slug', $option, $attribute_name );
-						$option = $term ? preg_replace( '/(?<!\/)\/(?!\/)/', '//', html_entity_decode( wp_strip_all_tags( $term->name ) ) ) : '';
-					}
-					$custom_attributes[ $attribute_slug ][] = $option;
-				}
-
-				if ( ! empty( $custom_attributes[ $attribute_slug ] ) &&
-					is_array( $custom_attributes[ $attribute_slug ] ) &&
-					1 === count( $custom_attributes[ $attribute_slug ] ) ) {
-					$custom_attributes[ $attribute_slug ] = $custom_attributes[ $attribute_slug ][0];
-				}
-			}
-		}
-
-		return $custom_attributes;
-	}
-
-	/**
-	 * Obtain all attributes of product (basic and custom).
-	 *
-	 * @param integer $product_id The ID of the product.
-	 *
-	 * @return array List of attributes
-	 */
-	private static function get_all_attributes( $product_id ) {
-
-		$product_attributes = wc_get_product( $product_id )->get_attributes();
-		$basic_attributes   = get_post_meta( $product_id );
-		$basic_clean        = array();
-
-		foreach ( $basic_attributes as $key_attr => $basic_attr ) {
-			$key_attr                 = '_' === $key_attr[0] ? substr( $key_attr, 1 ) : $key_attr;
-			$basic_clean[ $key_attr ] = $basic_attr[0] ?? '';
-		}
-		return array_merge( $product_attributes, $basic_clean );
-	}
-
-	/**
-	 * Get product taxonomy terms for the taxonomies the user has configured in Custom Attributes.
-	 *
-	 * Only processes entries with type 'taxonomy'. For variations, pass the parent product ID
-	 * so taxonomies are correctly retrieved.
-	 *
-	 * @param int   $product_id  The product (or parent) ID to look up taxonomy terms for.
-	 * @param array $custom_attr The custom attributes configuration from Settings::get_custom_attributes().
+	 * @param int $product_id The product (or parent) ID to look up taxonomy terms for.
 	 * @return array Associative array of field => string[] term names, ready to merge into product data.
 	 */
-	private static function get_taxonomy_custom_attributes( $product_id, $custom_attr ) {
+	private static function get_taxonomy_attributes( $product_id ) {
+		$taxonomies = self::get_product_taxonomies();
+
+		if ( empty( $taxonomies ) ) {
+			return array();
+		}
+
+		$terms = wp_get_object_terms( $product_id, $taxonomies );
+
+		if ( is_wp_error( $terms ) || empty( $terms ) ) {
+			return array();
+		}
+
 		$result = array();
 
-		foreach ( $custom_attr as $attr ) {
-			if ( 'taxonomy' !== $attr['type'] ) {
-				continue;
-			}
-
-			// Stored attribute is the dropdown key (e.g. 'taxonomy_series'); strip the prefix to get the slug.
-			$taxonomy_slug = str_starts_with( $attr['attribute'], 'taxonomy_' )
-				? substr( $attr['attribute'], strlen( 'taxonomy_' ) )
-				: $attr['attribute'];
-
-			$terms = wp_get_object_terms( $product_id, $taxonomy_slug, array( 'fields' => 'names' ) );
-			if ( is_wp_error( $terms ) || empty( $terms ) ) {
-				continue;
-			}
-
-			$result[ $attr['field'] ] = $terms;
+		foreach ( $terms as $term ) {
+			$result[ self::reserved_safe_name( $term->taxonomy ) ][] = $term->name;
 		}
 
 		return $result;
 	}
 
 	/**
-	 * To obtain the slug mapped from the original product attribute.
+	 * List the product taxonomies to emit, resolved once per request.
 	 *
-	 * @param array  $custom_attr Array of custom attributes.
-	 * @param string $attribute_slug slug we are looking for.
+	 * WooCommerce's own taxonomies are left out: categories and tags have their own canonical
+	 * fields, the `pa_` ones are already emitted as attributes, and the rest are internal.
 	 *
-	 * @return string Found slug or false
+	 * @return string[] The taxonomy slugs.
 	 */
-	private static function get_slug_from_map_attributes( $custom_attr, $attribute_slug ) {
+	private static function get_product_taxonomies() {
+		static $taxonomies = null;
 
-		$all_attributes            = wc_get_attribute_taxonomies();
-		$custom_map                = array_column( $custom_attr, 'field', 'attribute' );
-		$normalized_attribute_slug = str_replace( '-', '_', $attribute_slug );
-
-		foreach ( $all_attributes as $attribute ) {
-			$normalized_attribute_name = str_replace( '-', '_', $attribute->attribute_name );
-
-			if ( $normalized_attribute_name === $normalized_attribute_slug ) {
-				$found_key  = (int) $attribute->attribute_id;
-				$custom_key = 'wc_' . $found_key;
-
-				if ( isset( $custom_map[ $custom_key ] ) ) {
-					return $custom_map[ $custom_key ];
-				}
-			}
+		if ( null !== $taxonomies ) {
+			return $taxonomies;
 		}
-		return false;
-	}
 
+		$taxonomies = array();
+
+		foreach ( get_object_taxonomies( 'product' ) as $slug ) {
+			if ( str_starts_with( $slug, 'pa_' ) || in_array( $slug, self::EXCLUDED_TAXONOMIES, true ) ) {
+				continue;
+			}
+
+			$taxonomies[] = $slug;
+		}
+
+		return $taxonomies;
+	}
 
 	/**
 	 * Get the category path for a product.
